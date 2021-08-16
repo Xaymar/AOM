@@ -1,0 +1,145 @@
+name: Build
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, Tag or Commit to build'
+        required: true
+        default: 'master'
+
+jobs:
+  release:
+    name: "Release"
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      is_release: ${{ steps.data.outputs.is_tag }}
+    steps:
+    - name: "Checkout"
+      uses: actions/checkout@v2
+      with:
+        ref: "${{ github.event.inputs.ref }}"
+        submodules: "recursive"
+        fetch-depth: 0
+
+    - name: "Gather Information"
+      id: data
+      shell: bash
+      run: |
+        echo -n "Testing if a release is required..."
+        if git show-ref -q --verify "refs/tags/${{ github.event.inputs.ref }}"; then
+          echo "  Done. Release is required."
+          echo "::set-output name=is_tag::true"
+        else
+          echo "  Done."
+          echo "::set-output name=is_tag::false"
+        fi
+        echo "Gathering release message..."
+        echo "::set-output name=message::$(git log --format=%B -n 1 ${{ github.event.inputs.ref }} | sed -E 's/%/%25/gi' | sed -E 's/\n/%0A/gi' | sed -E 's/\r/%0D/gi')"
+        echo "::set-output name=commit::$(git rev-parse HEAD)"
+
+    - name: Create Release
+      id: create_release
+      if: ${{ steps.data.outputs.is_tag == 'true' }}
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: "${{ github.event.inputs.ref }}"
+        release_name: "AOM ${{ github.event.inputs.ref }}"
+        body: "${{ steps.data.outputs.message }}"
+        draft: true
+        prerelease: true
+        commitish: "${{ steps.data.outputs.commit }}"
+
+  windows:
+    runs-on: windows-2019
+    needs: release
+    strategy:
+      matrix:
+        bits: [ 64 ]
+        type: [ "static", "shared" ]
+        include:
+          - bits: 64
+            configure: "-G 'Visual Studio 16 2019' -A x64"
+    name: "Windows  (${{ matrix.bits }}bit, ${{ matrix.type }})"
+    steps:
+    - name: "Checkout"
+      uses: actions/checkout@v2
+      with:
+        ref: "${{ github.event.inputs.ref }}"
+        submodules: "recursive"
+        fetch-depth: 0
+
+    - name: "Automation: Gather Information"
+      id: data
+      shell: bash
+      run: |
+        # Detect Major.Minor.Patch version
+        VERSION=( $(git describe --tags --match "v[0-9]*.[0-9]*.[0-9]*" --abbrev=8 ${{ github.event.inputs.ref }} | sed -E 's/v([0-9]*)\.([0-9]*)\.([0-9]*)(.*)/\1 \2 \3/gi') )
+        COMMIT=$(git rev-parse --short=8 HEAD)
+        echo "AOM v${VERSION[0]}.${VERSION[1]}.${VERSION[2]}.${VERSION[3]}-${COMMIT}"
+        echo "::set-output name=major::${VERSION[0]}"
+        echo "::set-output name=minor::${VERSION[1]}"
+        echo "::set-output name=patch::${VERSION[2]}"
+        echo "::set-output name=commit::${COMMIT}"
+
+        # Build Type
+        if [ "${{ matrix.type }}" == "static" ]; then
+          echo "::set-output name=flags_type::-DBUILD_SHARED_LIBS=OFF"
+        else
+          echo "::set-output name=flags_type::-DBUILD_SHARED_LIBS=ON"
+        fi
+
+    - name: "Dependencies: Perl"
+      uses: shogo82148/actions-setup-perl@v1
+
+    - name: "Dependencies: YASM/NASM"
+      shell: bash
+      run: |
+        curl -L -o "yasm.exe" "http://www.tortall.net/projects/yasm/releases/yasm-1.3.0-win${{ matrix.bits }}.exe"
+
+    - name: "Build: Configure"
+      shell: bash
+      run: |
+        cmake -S "." -B "${PWD}/build/build/" \
+          ${{ matrix.configure }} \
+          -DAS_EXECUTABLE="${PWD}/yasm.exe" \
+          -DCMAKE_INSTALL_PREFIX="${PWD}/build/distrib" \
+          -DENABLE_DOCS=0 \
+          -DENABLE_EXAMPLES=1 \
+          -DENABLE_TESTS=0 \
+          -DENABLE_TOOLS=0 \
+          ${{ steps.data.outputs.flags_type }}
+
+    - name: "Build: Compile"
+      shell: bash
+      run: |
+        ls -lha "${PWD}/build/build/"
+        cmake --build "${PWD}/build/build" --config Release --target Install
+
+    - name: "Automation: Upload Artifacts"
+      uses: actions/upload-artifact@v1
+      with:
+        name: aom-windows-${{ matrix.bits }}-${{ matrix.type }}-${{ steps.data.outputs.major }}.${{ steps.data.outputs.minor }}.${{ steps.data.outputs.patch }}-${{ steps.data.outputs.commit }}
+        path: build/distrib
+
+    - name: "Release: Compress Binaries"
+      if: ${{ needs.release.outputs.is_release == 'true' }}
+      shell: bash
+      run: |
+        pushd build/distrib/ > /dev/null
+        7z a -r -ssw -m0=lzma2 -mx=9 -aoa "../../aom-windows-${{ matrix.bits }}-${{ matrix.type }}-${{ steps.data.outputs.major }}.${{ steps.data.outputs.minor }}.${{ steps.data.outputs.patch }}-${{ steps.data.outputs.commit }}.7z" ./
+        popd > /dev/null
+
+    - name: "Release: Upload Artifact"
+      if: ${{ needs.release.outputs.is_release == 'true' }}
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.release.outputs.upload_url }}
+        asset_path: "./aom-windows-${{ matrix.bits }}-${{ matrix.type }}-${{ steps.data.outputs.major }}.${{ steps.data.outputs.minor }}.${{ steps.data.outputs.patch }}-${{ steps.data.outputs.commit }}.7z"
+        asset_name: "aom-windows-${{ matrix.bits }}-${{ matrix.type }}-${{ steps.data.outputs.major }}.${{ steps.data.outputs.minor }}.${{ steps.data.outputs.patch }}-${{ steps.data.outputs.commit }}.7z"
+        asset_content_type: application/x-7z-compressed
