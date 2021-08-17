@@ -1,4 +1,4 @@
-# AOM (unofficial mirror)
-This is an unofficial automated mirror, more information can be found [here](https://aomedia.googlesource.com/aom/).
+# AOM (Unofficial Mirror)
+This is my unofficial mirror of the AOM repository, with automation set up to produce Windows binaries. For more information, please check out the official repository [here](https://aomedia.googlesource.com/aom/).
 
-# Do not file bug reports or pull requests against this mirror, they will be ignored.
+# Do not file Issues and Pull Request against this repository!
